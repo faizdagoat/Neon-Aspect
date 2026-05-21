@@ -172,4 +172,15 @@ public class CutscenePlayer extends JPanel {
     }
 
     public boolean isFinished() { return finished; }
+
+    /** Sembunyikan JFXPanel agar tidak ada white background saat di-remove dari parent */
+    public void hideFxPanel() {
+        if (fxPanel != null) {
+            fxPanel.setVisible(false);
+            // Set scene kosong di FX thread agar tidak render apapun
+            Platform.runLater(() -> {
+                try { fxPanel.setScene(null); } catch (Exception ignored) {}
+            });
+        }
+    }
 }

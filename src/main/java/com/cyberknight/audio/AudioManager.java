@@ -10,18 +10,10 @@ import java.net.URL;
 /**
  * AudioManager – mengelola background musik game.
  *
- * Fitur:
- *  - Play musik dengan loop otomatis
- *  - Fade in / fade out saat ganti musik
- *  - Volume control
- *  - Stop / pause / resume
- *
- * Menggunakan JavaFX MediaPlayer (sudah ada di dependency).
- *
- * File musik taruh di: src/main/resources/audio/
- *   level_music.mp3  → Level 1, 2, 3
- *   boss1_music.mp3  → Boss NeonWraith  (opsional)
- *   boss2_music.mp3  → Boss Colossus Prime (opsional)
+ * Fix:
+ *  - Resource loading dilakukan di main thread, URL di-pass ke JavaFX thread
+ *  - Semua akses MediaPlayer dijaga agar hanya di JavaFX Application Thread
+ *  - Fade menggunakan Platform.runLater() yang aman
  */
 public class AudioManager {
 
@@ -29,11 +21,8 @@ public class AudioManager {
 
     private MediaPlayer currentPlayer;
     private String      currentTrack  = "";
-    private float       masterVolume  = 0.7f;
+    private double      masterVolume  = 0.7;
     private boolean     muted         = false;
-
-    // Fade
-    private Thread fadeThread;
 
     // Track keys
     public static final String TRACK_LEVEL = "audio/level_music.mp3";
@@ -51,8 +40,8 @@ public class AudioManager {
     // ── Play ──────────────────────────────────────────────────
 
     /**
-     * Putar track baru. Jika track sama sudah bermain, tidak restart.
-     * Fade out track lama, fade in track baru.
+     * Putar track baru. Resolve URL di calling thread, lalu execute di FX thread.
+     * Jika track sama sudah bermain, tidak restart.
      */
     public void play(String trackPath) {
         if (trackPath == null || trackPath.isEmpty()) { stop(); return; }
@@ -60,49 +49,56 @@ public class AudioManager {
 
         currentTrack = trackPath;
 
-        // Fade out track lama dulu, lalu play baru
-        if (currentPlayer != null) {
-            fadeOutThen(() -> startNewTrack(trackPath));
-        } else {
-            Platform.runLater(() -> startNewTrack(trackPath));
+        // Resolve URL di thread ini (bukan FX thread) agar classloader benar
+        URL url = resolveURL(trackPath);
+        if (url == null) {
+            System.err.println("[Audio] File tidak ditemukan: " + trackPath);
+            return;
         }
+
+        final String urlStr = url.toExternalForm();
+        Platform.runLater(() -> startNewTrack(urlStr));
     }
 
-    private void startNewTrack(String path) {
+    private URL resolveURL(String path) {
+        // Coba classloader
         URL url = getClass().getClassLoader().getResource(path);
-        if (url == null) {
-            System.err.println("[Audio] File tidak ditemukan: " + path);
-            // Coba file fallback
-            url = getClass().getClassLoader().getResource(TRACK_LEVEL);
-            if (url == null) return;
-        }
+        if (url != null) return url;
+        // Coba dengan leading slash
+        url = getClass().getResource("/" + path);
+        return url;
+    }
 
+    private void startNewTrack(String urlString) {
+        // Harus di FX thread
         try {
-            Media media = new Media(url.toExternalForm());
-            MediaPlayer player = new MediaPlayer(media);
-
-            player.setVolume(muted ? 0 : masterVolume);
-            player.setCycleCount(MediaPlayer.INDEFINITE); // loop selamanya
-            player.setOnError(() ->
-                System.err.println("[Audio] Error: " + player.getError())
-            );
-
-            // Fade in dari volume 0
-            player.setVolume(0);
-            player.play();
-
-            // Simpan reference
+            // Stop dan dispose player lama dulu
             if (currentPlayer != null) {
                 currentPlayer.stop();
                 currentPlayer.dispose();
+                currentPlayer = null;
             }
-            currentPlayer = player;
 
-            // Fade in
-            fadeIn();
+            Media media = new Media(urlString);
+            MediaPlayer player = new MediaPlayer(media);
+
+            player.setCycleCount(MediaPlayer.INDEFINITE); // loop
+            player.setVolume(0); // mulai dari 0 untuk fade in
+            player.setOnError(() ->
+                System.err.println("[Audio] MediaPlayer error: " + player.getError())
+            );
+
+            player.setOnReady(() -> {
+                player.play();
+                // Fade in setelah player siap
+                fadeIn(player);
+            });
+
+            currentPlayer = player;
 
         } catch (Exception e) {
             System.err.println("[Audio] startNewTrack error: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -110,105 +106,94 @@ public class AudioManager {
 
     public void stop() {
         currentTrack = "";
-        if (currentPlayer != null) {
-            fadeOutThen(() -> {
+        Platform.runLater(() -> {
+            if (currentPlayer != null) {
                 currentPlayer.stop();
                 currentPlayer.dispose();
                 currentPlayer = null;
-            });
-        }
+            }
+        });
     }
 
     public void pause() {
-        if (currentPlayer != null) Platform.runLater(() -> currentPlayer.pause());
+        Platform.runLater(() -> {
+            if (currentPlayer != null) currentPlayer.pause();
+        });
     }
 
     public void resume() {
-        if (currentPlayer != null) Platform.runLater(() -> currentPlayer.play());
+        Platform.runLater(() -> {
+            if (currentPlayer != null) currentPlayer.play();
+        });
     }
 
     public boolean isPlaying() {
         if (currentPlayer == null) return false;
-        return currentPlayer.getStatus() == MediaPlayer.Status.PLAYING;
+        try {
+            return currentPlayer.getStatus() == MediaPlayer.Status.PLAYING;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // ── Volume ────────────────────────────────────────────────
 
-    public void setVolume(float vol) {
-        masterVolume = Math.max(0f, Math.min(1f, vol));
-        if (currentPlayer != null && !muted) {
-            float v = masterVolume;
-            Platform.runLater(() -> currentPlayer.setVolume(v));
+    public void setVolume(double vol) {
+        masterVolume = Math.max(0.0, Math.min(1.0, vol));
+        if (!muted) {
+            double v = masterVolume;
+            Platform.runLater(() -> {
+                if (currentPlayer != null) currentPlayer.setVolume(v);
+            });
         }
     }
 
     public void toggleMute() {
         muted = !muted;
-        if (currentPlayer != null) {
-            double v = muted ? 0 : masterVolume;
-            Platform.runLater(() -> currentPlayer.setVolume(v));
-        }
+        double v = muted ? 0 : masterVolume;
+        Platform.runLater(() -> {
+            if (currentPlayer != null) currentPlayer.setVolume(v);
+        });
     }
 
     public boolean isMuted()       { return muted; }
-    public float getMasterVolume() { return masterVolume; }
+    public double getMasterVolume() { return masterVolume; }
 
     // ── Fade ──────────────────────────────────────────────────
 
-    private void fadeIn() {
-        if (currentPlayer == null) return;
-        cancelFade();
-        fadeThread = new Thread(() -> {
-            try {
-                double target = muted ? 0 : masterVolume;
-                for (int i = 0; i <= 30; i++) {
-                    double vol = (i / 30.0) * target;
-                    MediaPlayer p = currentPlayer;
-                    if (p == null) break;
-                    Platform.runLater(() -> { if (currentPlayer != null) currentPlayer.setVolume(vol); });
-                    Thread.sleep(30);
-                }
-            } catch (InterruptedException ignored) {}
-        });
-        fadeThread.setDaemon(true);
-        fadeThread.start();
+    /**
+     * Fade in: naikkan volume dari 0 ke masterVolume secara bertahap.
+     * Menggunakan Timeline-style via recursive Platform.runLater.
+     */
+    private void fadeIn(MediaPlayer player) {
+        fadeStep(player, 0, 30);
     }
 
-    private void fadeOutThen(Runnable after) {
-        if (currentPlayer == null) { if (after != null) Platform.runLater(after); return; }
-        cancelFade();
-        MediaPlayer fadingPlayer = currentPlayer;
-        fadeThread = new Thread(() -> {
-            try {
-                double startVol = fadingPlayer.getVolume();
-                for (int i = 30; i >= 0; i--) {
-                    double vol = (i / 30.0) * startVol;
-                    Platform.runLater(() -> fadingPlayer.setVolume(vol));
-                    Thread.sleep(25);
-                }
-                Platform.runLater(() -> {
-                    fadingPlayer.stop();
-                    fadingPlayer.dispose();
-                    if (after != null) after.run();
-                });
-            } catch (InterruptedException ignored) {}
-        });
-        fadeThread.setDaemon(true);
-        fadeThread.start();
-    }
+    private void fadeStep(MediaPlayer player, int step, int totalSteps) {
+        if (player != currentPlayer) return; // player sudah diganti, batalkan
+        if (step > totalSteps) {
+            player.setVolume(muted ? 0 : masterVolume);
+            return;
+        }
+        double vol = (step / (double) totalSteps) * (muted ? 0 : masterVolume);
+        player.setVolume(vol);
 
-    private void cancelFade() {
-        if (fadeThread != null && fadeThread.isAlive()) fadeThread.interrupt();
+        // Jadwalkan step berikutnya setelah ~30ms menggunakan Thread + Platform.runLater
+        Thread t = new Thread(() -> {
+            try { Thread.sleep(30); } catch (InterruptedException ignored) {}
+            Platform.runLater(() -> fadeStep(player, step + 1, totalSteps));
+        });
+        t.setDaemon(true);
+        t.start();
     }
 
     public void dispose() {
-        cancelFade();
-        if (currentPlayer != null) {
-            Platform.runLater(() -> {
+        Platform.runLater(() -> {
+            if (currentPlayer != null) {
                 currentPlayer.stop();
                 currentPlayer.dispose();
                 currentPlayer = null;
-            });
-        }
+            }
+        });
     }
 }

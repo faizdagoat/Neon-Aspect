@@ -84,11 +84,13 @@ public class GamePanel extends JPanel implements Runnable {
         state    = GameState.CUTSCENE;
         cutscene = new CutscenePlayer(SCREEN_W, SCREEN_H, () -> {
             SwingUtilities.invokeLater(() -> {
+                // Sembunyikan dulu sebelum remove agar tidak ada white flash dari JFXPanel
+                cutscene.setVisible(false);
+                cutscene.hideFxPanel();
                 remove(cutscene);
                 cutscene = null;
                 revalidate();
                 repaint();
-                // Setelah cutscene → layar LOGIN
                 state = GameState.LOGIN;
                 fadeIn();
                 requestFocusInWindow();
@@ -228,8 +230,8 @@ public class GamePanel extends JPanel implements Runnable {
 
     private void checkPause() {
         if (input.consumePause()) {
-            // JANGAN reset escape atau flag lain di sini
-            // PauseScreen akan handle consumeEscape() sendiri saat state sudah PAUSED
+            // pausePressed di-set di keyPressed, escapePressed di keyReleased
+            // sehingga satu penekanan ESC tidak bisa membuka dan menutup sekaligus
             state = GameState.PAUSED;
         }
     }
@@ -243,8 +245,6 @@ public class GamePanel extends JPanel implements Runnable {
         if (fadingOut) return;
         fadingIn  = false;
         fadingOut = true;
-        // Start fade from current alpha (not 0!) so it always reaches 1f
-        // fadeAlpha keeps its current value and counts UP to 1f
         afterFade = after;
     }
 
